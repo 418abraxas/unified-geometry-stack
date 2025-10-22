@@ -8,3 +8,7 @@ def index():
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+@app.get("/healthz")
+def healthz():
+    return JSONResponse({"status": "ok"})
