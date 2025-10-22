@@ -1,21 +1,34 @@
-from fastapi import APIRouter
-from hashlib import sha256
-import uuid, json
-from models.schema import Coordinates, DarkNode
-from core.vault import write_vault
+# api/router_darkzone.py
+from fastapi import APIRouter, Body, Depends
+from sqlalchemy.orm import Session
+from datetime import datetime
+from core.database import get_db
+from models.db_models import DarkzoneDB
 
-router = APIRouter(prefix="/darkzone", tags=["Synthesis"])
+router = APIRouter(prefix="/darkzone", tags=["DarkZone"])
 
 @router.post("/synthesize")
-def synthesize(boundary_nodes: list[Coordinates]):
-    coords = Coordinates(x=[0.02]*32, theta=0.3, r=0.8, conf=0.6)
-    dark = DarkNode(
-        id=str(uuid.uuid4()),
-        coords=coords,
-        payload={"summary": "Synthesized node", "tokens": []},
-        conf=0.6,
-        tag="PROVISIONAL",
-        boundary_hash=sha256(json.dumps([n.dict() for n in boundary_nodes]).encode()).hexdigest()
-    )
-    write_vault("Dark", dark.dict(), dark.id)
-    return dark
+def synthesize_darkzone(
+    boundary_nodes: list = Body(...),
+    region: str = Body("unspecified"),
+    db: Session = Depends(get_db)
+):
+    """
+    Create a darkzone synthesis record.
+    """
+    payload = {
+        "boundary_nodes": boundary_nodes,
+        "region": region,
+        "result": {"DarkNode": f"dz_{len(boundary_nodes)}", "confidence": 0.9},
+        "timestamp": datetime.utcnow().isoformat()
+    }
+    record = DarkzoneDB(payload=payload)
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return {"Darkzone_ID": str(record.id), "payload": record.payload}
+
+@router.get("")
+def list_darkzones(db: Session = Depends(get_db), limit: int = 10):
+    rows = db.query(DarkzoneDB).order_by(DarkzoneDB.created_at.desc()).limit(limit).all()
+    return [{"id": str(r.id), "payload": r.payload} for r in rows]
