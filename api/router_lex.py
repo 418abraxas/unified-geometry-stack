@@ -1,11 +1,15 @@
 # api/router_lex.py
-from fastapi import APIRouter, Body
+from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
 from hashlib import sha256
 from datetime import datetime
-import uuid, os, json
-from core.vault import write_vault
+import uuid
+from sqlalchemy.orm import Session
+from core.database import get_db, engine, Base
+from models.db_models import ConceptNodeDB
+
+Base.metadata.create_all(bind=engine)
 
 router = APIRouter(prefix="/lex", tags=["Lexicon"])
 
@@ -18,49 +22,50 @@ class Query(BaseModel):
     tok: Optional[str] = None
     span: Optional[str] = None
 
-# ----- /lex/encode -----
 @router.post("/encode")
-def encode(artifact: str = Body(..., embed=True), consent: ConsentVector = Body(...)):
-    coords = {"x": [0.01] * 32, "theta": 0.2, "r": 0.7, "conf": 0.9}
-    anchor_id = sha256(f"{artifact}{datetime.utcnow()}".encode()).hexdigest()
-    node = {
-        "id": str(uuid.uuid4()),
-        "coords": coords,
-        "payload": {
-            "kind": "text",
-            "bytes_hash": sha256(artifact.encode()).hexdigest()
-        },
-        "provenance": {
-            "EncoderCardHash": "Φ_enc_vΣ",
-            "timestamp": datetime.utcnow().isoformat()
-        },
+def encode(artifact: str = Body(..., embed=True), consent: ConsentVector = Body(...), db: Session = Depends(get_db)):
+    bytes_hash = sha256(artifact.encode()).hexdigest()
+    payload = {
+        "coords": {"x": [0.01] * 32, "theta": 0.2, "r": 0.7, "conf": 0.9},
+        "provenance": {"EncoderCardHash": "Φ_enc_vΣ", "timestamp": datetime.utcnow().isoformat()},
         "metrics": {"dH_nearest": 0.0, "Lambda": 0.0, "DeltaK": 0.0},
-        "tags": ["ENCODED"]
+        "tags": ["ENCODED"],
+        "consent": consent.model_dump(),
     }
-    write_vault("Concepts", node, anchor_id)
-    return {"ConceptNode": node, "Anchor_ID": anchor_id}
+    node = ConceptNodeDB(artifact=artifact, bytes_hash=bytes_hash, payload=payload)
+    db.add(node)
+    db.commit()
+    db.refresh(node)
+    return {"ConceptNode": node.id, "Artifact": artifact, "Anchor_ID": str(node.id)}
 
-# ----- /lex/retrieve -----
 @router.post("/retrieve")
-def retrieve(query: Query = Body(...), K: int = Body(5, embed=True)):
-    term = query.tok or query.span or ""
-    # For now return dummy candidates
-    candidates = [
+def retrieve(query: Query = Body(...), K: int = Body(5, embed=True), db: Session = Depends(get_db)):
+    term = query.tok or query.span
+    if not term:
+        raise HTTPException(status_code=400, detail="Provide tok or span in query")
+
+    candidates = (
+        db.query(ConceptNodeDB)
+        .filter(ConceptNodeDB.artifact.ilike(f"%{term}%"))
+        .order_by(ConceptNodeDB.created_at.desc())
+        .limit(K)
+        .all()
+    )
+    results = [
         {
-            "node": term + f"_{i}",
-            "d_H": round(0.1 * i, 2),
+            "node": str(c.id),
+            "artifact": c.artifact,
+            "d_H": 0.1 * i,
             "S_exp": round(1.0 / (1 + i), 2),
             "tag": "RELATED_NEAR" if i < 3 else "RELATED_FAR",
-            "Λ": 0.5 + 0.1 * i
+            "Λ": 0.5 + 0.1 * i,
         }
-        for i in range(K)
+        for i, c in enumerate(candidates)
     ]
-    return {"candidates": candidates}
+    return {"candidates": results}
 
-# ----- /lex/conceptify -----
 @router.post("/conceptify")
 def conceptify(text: str = Body(..., embed=True)):
-    # simple mock
     tokens = text.split()
     nodes = [{"token": t, "concept_id": sha256(t.encode()).hexdigest()[:8]} for t in tokens]
     return {"nodes": nodes}
